@@ -17,27 +17,23 @@ import (
 //
 
 const (
-
-	//  relevant to response message
-	NO_RESOURCES          = 1
-	NORMAL                = 1 << 1
-	SUCCESSFUL_RECEIVE    = 1 << 2
-	NICE_EXIT             = 1 << 3
-	SUCCESSFUL_ADDINGTASK = 1 << 4
-	TASKSETS              = 1 << 5
+	// constant for MessageType
+	TASK_ASSIGN = 1 << iota
+	COMPLETEDTASK
+	COORDINATOR_RECEIVE
+	NO_TASK_TO_ASSIGN
+	TASKASSKING
 )
 
 type Request struct {
-	Name          string // Name of the Worker
-	CompletedTask *Task
-	ReduceSlice   int
+	WorkerInfo    WorkerProperties
+	CompletedTask *TaskGroup
 }
 
 type Response struct {
-	AssignedTask *Task
-	Message      int32
+	MessageType  int32
+	AssignedTask *TaskGroup
 	NReduce      int
-	TaskSet      []*Task
 }
 
 // Add your RPC definitions here.

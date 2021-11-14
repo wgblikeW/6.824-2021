@@ -2,13 +2,11 @@ package mr
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
 	"log"
-	"math/big"
 	"net/rpc"
 	"os"
 	"sort"
@@ -16,7 +14,12 @@ import (
 	"time"
 )
 
-const SINGELETASK int = 1
+var completedCh chan *TaskGroup = make(chan *TaskGroup)
+var WorkerInfo WorkerProperties = WorkerProperties{WorkerName: getWorkerName()}
+
+type WorkerProperties struct {
+	WorkerName string
+}
 
 // for sorting by key.
 type ByKey []KeyValue
@@ -33,9 +36,6 @@ type KeyValue struct {
 	Value string
 }
 
-var completedTaskCh chan *Task
-var worker_name string
-
 //
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -46,24 +46,44 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+func getWorkerName() string {
+	randBytes := make([]byte, 4)
+	rand.Read(randBytes)
+	return fmt.Sprintf("%x", randBytes)
+}
+
 //
-// TaskCompletedHandler Sends Completed task to the
-// Coordinator and ensure the coordinator receives the
-// message correctly
+// brokenFixed remove the broken files
 //
-func TaskCompletedHandler(completedTaskCh chan *Task) {
-	for completedTask := range completedTaskCh {
+func brokenFixed(taskType int32, taskID int32, NReduce int) {
+
+	var fileName string
+	switch taskType {
+	case MAPTASK:
+		for i := 0; i < NReduce; i++ {
+			fileName = "mr-" + strconv.Itoa(int(taskID)) + "-" + strconv.Itoa(i)
+			os.Remove(fileName)
+
+		}
+	case REDUCETASK:
+		fileName = "mr-out" + strconv.Itoa(int(taskID))
+		os.Remove(fileName)
+	}
+}
+
+func completedMessageSender() {
+	for {
+		completedTask := <-completedCh
 		request := Request{
-			Name:          worker_name,
+			WorkerInfo:    WorkerInfo,
 			CompletedTask: completedTask,
 		}
 		response := Response{}
-		call("Coordinator.TaskCompletedSignalHandler", &request, &response)
-		if response.Message == SUCCESSFUL_RECEIVE {
-			log.Printf("Coordinator Successfully receives task completed message")
-		} else {
-			log.Printf("Completed Task announcement Missing")
+		call("Coordinator.TaskCompletedHandler", &request, &response)
+		if response.MessageType != COORDINATOR_RECEIVE {
+			log.Fatalf("Loss Connection to Coordinator")
 		}
+		log.Printf("TaskID %v has completed", completedTask.TaskID)
 	}
 }
 
@@ -71,36 +91,91 @@ func TaskCompletedHandler(completedTaskCh chan *Task) {
 // Worker do the main logic of Tasks
 //
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
-	completedTaskCh = make(chan *Task, 5)
-	go TaskCompletedHandler(completedTaskCh)
-	randInt, _ := rand.Int(rand.Reader, big.NewInt(1<<32))
-	worker_name = fmt.Sprintf("%x", sha256.Sum256(randInt.Bytes()))
+	go completedMessageSender()
+
 	for {
 		time.Sleep(time.Second)
-		resp := RetrieveTask(worker_name)
-		if resp.Message == NORMAL && resp.AssignedTask.TaskClassification == MAPTASK {
-			RunMapTask(resp.AssignedTask, mapf, resp.NReduce)
-			completedTaskCh <- resp.AssignedTask
+		request := Request{
+			WorkerInfo: WorkerInfo,
 		}
-		if resp.Message == TASKSETS {
-			RunReduceTask(resp.TaskSet, reducef, resp.NReduce)
-			for _, task := range resp.TaskSet {
-				completedTaskCh <- task
+		response := Response{
+			MessageType: TASKASSKING,
+		}
+		call("Coordinator.AssignedTask", &request, &response)
+		if response.MessageType == NO_TASK_TO_ASSIGN {
+			continue
+		}
+		// Crash Recovery
+		brokenFixed(response.AssignedTask.TaskType, response.AssignedTask.TaskID, response.NReduce)
+		retrieveTask := response.AssignedTask
+
+		switch retrieveTask.TaskType {
+		case MAPTASK:
+			{
+				RunMapTask(retrieveTask, mapf, response.NReduce)
+				completedCh <- retrieveTask
 			}
+		case REDUCETASK:
+			RunReduceTask(retrieveTask, reducef, response.NReduce)
+			completedCh <- retrieveTask
 		}
+
 	}
 }
 
-//
-// RunReduceTask actually do the ReduceTask logic
-//
-func RunReduceTask(assignedTask []*Task, reducef func(string, []string) string, nreduce int) {
+func RunMapTask(assignedTask *TaskGroup, mapf func(string, string) []KeyValue, nreduce int) error {
+	log.Printf("Receive MapTask %v ", assignedTask.TaskID)
+	implementTask := assignedTask.TaskList[0]
 	intermediate := []KeyValue{}
-	outfilename := "mr-out-" + string(assignedTask[0].TaskIdentify)
-	log.Printf("Receive ReduceTask %v ", assignedTask[0].TaskIdentify)
 
-	for _, task := range assignedTask {
-		task.OutputFile = outfilename
+	// open input file that was assigned by the coordinator
+	file, err := os.Open(implementTask.InputFile)
+	if err != nil {
+		log.Fatalf("cannot open file %v", implementTask.InputFile)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", implementTask.InputFile)
+	}
+	defer file.Close()
+
+	// call user's MapTask to finish the task
+	kva := mapf(implementTask.InputFile, string(content))
+	intermediate = append(intermediate, kva...)
+	sort.Sort(ByKey(intermediate))
+
+	// creating intermediate files and spliting inputfile based on key hash
+	i := 0
+	var output_filenameSet = make(map[string]int)
+	for i < len(intermediate) {
+		j := i + 1
+		reduceTaskID := ihash(intermediate[i].Key) % nreduce
+		output_filename := "mr-" + strconv.Itoa(int(assignedTask.TaskID)) + "-" + strconv.Itoa(reduceTaskID)
+		output_filenameSet[output_filename] = reduceTaskID
+		outputfile, err := os.OpenFile(output_filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+		if err != nil {
+			log.Fatalf("cannot open/create intermediate file for task %v", output_filename)
+		}
+		enc := json.NewEncoder(outputfile)
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			enc.Encode(&intermediate[j])
+			j++
+		}
+		enc.Encode(&intermediate[i])
+		outputfile.Close()
+		i = j
+	}
+
+	log.Printf("MapTask ID %v has completed", assignedTask.TaskID)
+	return nil
+}
+
+func RunReduceTask(assignedTask *TaskGroup, reducef func(string, []string) string, nreduce int) {
+	intermediate := []KeyValue{}
+	outfilename := "mr-out-" + strconv.Itoa(int(assignedTask.TaskID))
+	log.Printf("Receive ReduceTask %v ", assignedTask.TaskID)
+
+	for _, task := range assignedTask.TaskList {
 		file, err := os.Open(task.InputFile)
 		if err != nil {
 			log.Printf("cannot open %v", task.InputFile)
@@ -118,10 +193,10 @@ func RunReduceTask(assignedTask []*Task, reducef func(string, []string) string, 
 	sort.Sort(ByKey(intermediate))
 
 	// create reduceTask outputfile
-	log.Printf("outfilename %v", assignedTask[0].OutputFile)
-	ofile, err := os.OpenFile(assignedTask[0].OutputFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0666)
+	log.Printf("outfilename %v", outfilename)
+	ofile, err := os.OpenFile(outfilename, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0666)
 	if err != nil {
-		log.Fatalf("cannot create/open outputfile for reducetask %v", assignedTask[0].OutputFile)
+		log.Fatalf("cannot create/open outputfile for reducetask %v", outfilename)
 	}
 	defer ofile.Close()
 
@@ -143,94 +218,7 @@ func RunReduceTask(assignedTask []*Task, reducef func(string, []string) string, 
 
 		i = j
 	}
-	log.Printf("ReduceTask completed %v", assignedTask[0].TaskIdentify)
-}
-
-//
-// RunMapTask perform the MapTask logic
-//
-func RunMapTask(assignedTask *Task, mapf func(string, string) []KeyValue, nreduce int) {
-	log.Printf("Receive MapTask %v ", assignedTask.TaskIdentify)
-	intermediate := []KeyValue{}
-
-	// open input file that was assigned by the coordinator
-	file, err := os.Open(assignedTask.InputFile)
-	if err != nil {
-		log.Fatalf("cannot open file %v", assignedTask.TaskIdentify)
-	}
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		log.Fatalf("cannot read %v", assignedTask.TaskIdentify)
-	}
-	defer file.Close()
-
-	kva := mapf(assignedTask.InputFile, string(content))
-	intermediate = append(intermediate, kva...)
-	sort.Sort(ByKey(intermediate))
-
-	i := 0
-	var output_filenameSet = make(map[string]int)
-	for i < len(intermediate) {
-		j := i + 1
-		reduceTaskID := ihash(intermediate[i].Key) % nreduce
-		output_filename := "mr-" + assignedTask.TaskIdentify + "-" + strconv.Itoa(reduceTaskID)
-		output_filenameSet[output_filename] = reduceTaskID
-		outputfile, err := os.OpenFile(output_filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
-		if err != nil {
-			log.Fatalf("cannot open/create intermediate file for task %v", assignedTask.TaskIdentify)
-		}
-		enc := json.NewEncoder(outputfile)
-		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-			enc.Encode(&intermediate[j])
-			j++
-		}
-		enc.Encode(&intermediate[i])
-		outputfile.Close()
-		i = j
-	}
-
-	for filename, reduceID := range output_filenameSet {
-		reduceTask := Task{
-			TaskIdentify:       strconv.Itoa(reduceID),
-			TaskClassification: REDUCETASK,
-			InputFile:          filename,
-			OutputFile:         "",
-		}
-		file, err := os.Open(filename)
-		if err != nil {
-			log.Fatalf("cannot open %v file", filename)
-		}
-		fi, err := file.Stat()
-		if err != nil {
-			log.Fatalf("cannot retrieve file struct %v", filename)
-		}
-		reduceTask.TaskSize = fi.Size()
-		AddingReduceTask(&reduceTask)
-	}
-	log.Printf("Intermediate file create for task %v", assignedTask.TaskIdentify)
-}
-
-//
-// RetrieveTask retrieve the task from the coordinator
-//
-func RetrieveTask(worker_name string) Response {
-	request := Request{Name: worker_name}
-
-	response := Response{}
-	call("Coordinator.AssignTasks", &request, &response)
-	return response
-}
-
-func AddingReduceTask(reduceTask *Task) {
-	request := Request{
-		Name:          worker_name,
-		CompletedTask: reduceTask,
-	}
-	response := Response{}
-	call("Coordinator.AddReduceTask", &request, &response)
-	if response.Message == SUCCESSFUL_ADDINGTASK {
-		log.Printf("Adding ReduceTask %v success", reduceTask.InputFile)
-	}
+	log.Printf("ReduceTask completed %v", outfilename)
 }
 
 //

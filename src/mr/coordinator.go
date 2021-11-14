@@ -6,136 +6,126 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
+	"path"
 	"strconv"
 	"sync"
 	"time"
 )
 
+type status int32
+
+// constant for TaskFlag
 const (
-	// relevant to Task kind
-	MAPTASK    int32 = 1
-	REDUCETASK int32 = 1 << 1
+	IDLE = 1 << iota
+	IN_PROCESS
+	COMPLETED
 )
 
+// constant for TaskType
+const (
+	MAPTASK = 1 << iota
+	REDUCETASK
+)
+
+const (
+	TIMEOUTMISSION = 10
+)
+
+type Signal struct {
+	StopCh      chan struct{}
+	CompletedCh chan *TaskGroup
+	TimeoutCh   chan *TaskGroup
+}
+
 type Task struct {
-	TaskIdentify       string
-	TaskSize           int64
-	InputFile          string
-	OutputFile         string
-	TaskClassification int32
+	InputFile  string
+	OutputFile string
+}
+
+type TaskGroup struct {
+	TaskID int32
+	// IDLE IN_PROCESS COMPLETED
+	TaskFlag status
+	TaskList []*Task
+	// MAPTASK REDUCETASK
+	TaskType int32
+}
+
+type CounterClock struct {
+	Counter int
+}
+
+func (C *CounterClock) Done() {
+	C.Counter -= 1
+}
+
+func (C *CounterClock) Add(total int) {
+	C.Counter += total
+}
+
+func (C *CounterClock) Wait() bool {
+	switch {
+	case C.Counter != 0:
+		return true
+	default:
+		return false
+	}
+}
+
+type Clock struct {
+	TimeoutReceiver  <-chan time.Time
+	TimeoutTaskGroup *TaskGroup
 }
 
 type Coordinator struct {
-	Mutex            sync.Mutex
-	WaitMapGroup     sync.WaitGroup
-	Task_Idle        []*Task
-	Task_IN_Progress []*Task
-	Task_Completed   []*Task
-	NReduce          int
-	stopCh           chan struct{}
+	TaskGroupList  []*TaskGroup
+	NReduce        int
+	SignalHandler  Signal
+	Mutex          sync.Mutex
+	MapTaskCounter *CounterClock
 }
 
-func (c *Coordinator) CoordinatorCompletedHandler() error {
-	for {
-		time.Sleep(time.Second)
-		c.Mutex.Lock()
-		if len(c.Task_IN_Progress) == 0 && len(c.Task_Idle) == 0 {
-			close(c.stopCh)
-		}
-		c.Mutex.Unlock()
-	}
-}
+func (c *Coordinator) AssignedTask(request *Request, response *Response) error {
 
-//
-// AssignTasks assign task to worker who asks for task through rpc
-//
-func (c *Coordinator) AssignTasks(request *Request, response *Response) error {
 	c.Mutex.Lock()
-	if len(c.Task_Idle) != 0 {
-		if c.Task_Idle[0].TaskClassification == REDUCETASK {
-			c.Mutex.Unlock()
-			c.WaitMapGroup.Wait()
-			c.Mutex.Lock()
-			response.Message = TASKSETS
-			response.NReduce = c.NReduce
-			response.TaskSet, _ = c.AssignedTaskSet()
-		} else {
-
-			// Task assign to worker
-			log.Printf("Worker-%v requests for task", request.Name)
-
-			response.AssignedTask = c.Task_Idle[0]
-			response.Message = NORMAL
-			response.NReduce = c.NReduce
-
-			// Remove Task From Idle and add To IN_Process
-			c.Task_IN_Progress = append(c.Task_IN_Progress, c.Task_Idle[0])
-			c.Task_Idle = c.Task_Idle[1:]
-		}
-
-	} else {
-		response.AssignedTask = nil
-		response.Message = NO_RESOURCES
-	}
-	c.Mutex.Unlock()
-	return nil
-}
-
-func (c *Coordinator) AssignedTaskSet() ([]*Task, error) {
-	var tasksSet []*Task
-	reduceID := c.Task_Idle[0].TaskIdentify
-	for _, task := range c.Task_Idle {
-		if task.TaskIdentify == reduceID {
-			tasksSet = append(tasksSet, task)
-			c.Task_IN_Progress = append(c.Task_IN_Progress, task)
-		}
-	}
-	for _, task := range tasksSet {
-		for index, idle_task := range c.Task_Idle {
-			if idle_task == task {
-				c.Task_Idle = append(c.Task_Idle[0:index], c.Task_Idle[index+1:]...)
-				break
-			}
-		}
-	}
-	return tasksSet, nil
-}
-
-//
-// TaskCompletedSignalHandler will be called by the worker who has
-// completed it's task
-//
-func (c *Coordinator) TaskCompletedSignalHandler(request *Request, response *Response) error {
-	c.Mutex.Lock()
-	completedTask := request.CompletedTask
-	response.Message = SUCCESSFUL_RECEIVE
-	if completedTask.TaskClassification == MAPTASK {
-		c.WaitMapGroup.Done()
-	}
-	// remove completedTask From IN_progress queue and
-	// adding it to the Completed_Task
-
-	for index, task := range c.Task_IN_Progress {
-		// confirm the index of completed task in IN_process queue
-		// Bad implementation
-		if task.InputFile == completedTask.InputFile {
-			log.Printf("Remove Task From In_progress list")
-			c.Task_Completed = append(c.Task_Completed, task)
-			c.Task_IN_Progress = append(c.Task_IN_Progress[0:index], c.Task_IN_Progress[index+1:]...)
-
+	defer c.Mutex.Unlock()
+	var assignedTask *TaskGroup
+	for _, task := range c.TaskGroupList {
+		if task.TaskFlag == IDLE && task.TaskType == REDUCETASK && c.MapTaskCounter.Wait() {
+			continue
+		} else if task.TaskFlag == IDLE && task.TaskType == MAPTASK {
+			assignedTask = task
+			break
+		} else if task.TaskFlag == IDLE && task.TaskType == REDUCETASK {
+			assignedTask = task
 			break
 		}
 	}
-	c.Mutex.Unlock()
-	return nil
-}
+	log.Printf("Counter %v", c.MapTaskCounter.Counter)
+	if assignedTask == nil {
+		// log.Printf("Worker %v asking for Task but no task to assign", request.WorkerInfo.WorkerName)
+		response.MessageType = NO_TASK_TO_ASSIGN
+	} else {
+		// log.Printf("Worker %v asking for Task", request.WorkerInfo.WorkerName)
+		// Assign MapTask Or ReduceTask When all MapTask completed
+		response.AssignedTask = assignedTask
+		response.MessageType = TASK_ASSIGN
+		response.NReduce = c.NReduce
+		// Mark the assignedTask TaskFLAG to IN_PROCESS
+		assignedTask.TaskFlag = IN_PROCESS
+		go func(regisTaskGroup *TaskGroup) {
+			<-time.NewTimer(time.Second * 10).C
+			c.Mutex.Lock()
+			if regisTaskGroup.TaskFlag == COMPLETED {
+				c.Mutex.Unlock()
+				return
+			}
+			log.Printf("TaskID %v TaskType %v Timeout", regisTaskGroup.TaskID, regisTaskGroup.TaskType)
+			c.Mutex.Unlock()
+			c.SignalHandler.TimeoutCh <- regisTaskGroup
+		}(assignedTask)
+	}
 
-func (c *Coordinator) AddReduceTask(request *Request, response *Response) error {
-	log.Printf("Adding new ReduceTask %v From worker %v", request.CompletedTask.TaskIdentify, request.Name)
-	c.Mutex.Lock()
-	c.Task_Idle = append(c.Task_Idle, request.CompletedTask)
-	response.Message = SUCCESSFUL_ADDINGTASK
-	c.Mutex.Unlock()
 	return nil
 }
 
@@ -160,39 +150,113 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	<-c.stopCh
-
+	<-c.SignalHandler.StopCh
 	log.Printf("The entire job has finished")
 
 	return true
 }
 
-//
-// ConstructTask construct the Task struct
-//
-func ConstructTask(files []string, taskClassification int32) []*Task {
-	var taskList []*Task
-	for index, filename := range files {
-		task_temp := Task{
-			TaskIdentify: strconv.Itoa(index),
+func JobCompletedHandler(c *Coordinator) error {
+	log.Printf("JobCompletedHandler Start")
+	for {
+		time.Sleep(time.Second)
+		counter := 0
+		c.Mutex.Lock()
+		for _, task := range c.TaskGroupList {
+			if task.TaskFlag == COMPLETED {
+				counter += 1
+			}
 		}
-		task_temp.InputFile = filename
+		if counter == len(c.TaskGroupList) {
+			c.SignalHandler.StopCh <- struct{}{}
+		}
+		c.Mutex.Unlock()
+	}
+}
 
-		file, err := os.Open(filename)
-		if err != nil {
-			log.Fatalf("cannot open %v", filename)
-		}
-		fi, err := file.Stat()
-		if err != nil {
-			log.Fatalf("cannot retrieve %v file struct", filename)
-		}
+func (c *Coordinator) TaskCompletedHandler(request *Request, response *Response) error {
+	completedTask := request.CompletedTask
+	c.Mutex.Lock()
 
-		task_temp.TaskSize = fi.Size()
-		task_temp.TaskClassification = taskClassification
-		taskList = append(taskList, &task_temp)
+	// mark the completed task flag from IN_PROCESS to COMPLETED
+	for _, task := range c.TaskGroupList {
+		if task.TaskID == completedTask.TaskID && task.TaskType == completedTask.TaskType {
+			task.TaskFlag = COMPLETED
+			if task.TaskType == MAPTASK {
+				c.MapTaskCounter.Done()
+			}
+			break
+		}
+	}
+	c.Mutex.Unlock()
+	response.MessageType = COORDINATOR_RECEIVE
+	return nil
+}
+
+func (c *Coordinator) ConstructTaskGroupList(files []string, nReduce int) {
+	fileslen := len(files)
+	// workDir, _ := os.Getwd()
+	workDir := ""
+	for i := 0; i < fileslen; i++ {
+		var taskGroup *TaskGroup = &TaskGroup{}
+
+		taskGroup.TaskID = int32(i)
+		taskGroup.TaskFlag = IDLE
+		taskGroup.TaskList = make([]*Task, 1)
+		taskGroup.TaskType = MAPTASK
+
+		InputFilePath := path.Join(workDir, files[i])
+
+		task := Task{InputFile: InputFilePath}
+		taskGroup.TaskList[0] = &task
+		c.TaskGroupList[i] = taskGroup
+
 	}
 
-	return taskList
+	for i := 0; i < nReduce; i++ {
+		var taskGroup *TaskGroup = &TaskGroup{}
+
+		taskGroup.TaskID = int32(i)
+		taskGroup.TaskFlag = IDLE
+		taskGroup.TaskList = make([]*Task, fileslen)
+		taskGroup.TaskType = REDUCETASK
+
+		for j := 0; j < fileslen; j++ {
+			InputFilePath := path.Join(workDir, "mr-"+strconv.Itoa(j)+"-"+strconv.Itoa(i))
+			task := Task{InputFile: InputFilePath}
+			taskGroup.TaskList[j] = &task
+		}
+		c.TaskGroupList[i+fileslen] = taskGroup
+
+	}
+}
+
+func Debug(c *Coordinator, totalTask int) error {
+	log.Println("DEBUG INFO")
+	for i := 0; i < totalTask; i++ {
+		taskGroup := c.TaskGroupList[i]
+		log.Printf("TaskID %v TaskFlag %v TaskType %v", taskGroup.TaskID, taskGroup.TaskFlag, taskGroup.TaskType)
+		taskList := taskGroup.TaskList
+		for _, task := range taskList {
+			log.Printf("Inputfile %v", task.InputFile)
+		}
+		log.Printf("\n")
+	}
+	return nil
+}
+
+func (c *Coordinator) timeoutHandler() {
+	for taskGroup := range c.SignalHandler.TimeoutCh {
+		c.Mutex.Lock()
+		log.Printf("Recover TaskID %v TaskType %v", taskGroup.TaskID, taskGroup.TaskType)
+		for _, taskGp := range c.TaskGroupList {
+			if taskGp.TaskID == taskGroup.TaskID && taskGp.TaskType == taskGroup.TaskType {
+				taskGp.TaskFlag = IDLE
+				break
+			}
+		}
+		c.Mutex.Unlock()
+	}
 }
 
 //
@@ -201,21 +265,25 @@ func ConstructTask(files []string, taskClassification int32) []*Task {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	c := Coordinator{
+		TaskGroupList: make([]*TaskGroup, len(files)+nReduce),
+		NReduce:       nReduce,
+		SignalHandler: Signal{
+			StopCh:      make(chan struct{}),
+			CompletedCh: make(chan *TaskGroup, nReduce),
+			TimeoutCh:   make(chan *TaskGroup, TIMEOUTMISSION),
+		},
+		MapTaskCounter: &CounterClock{
+			Counter: len(files),
+		},
+	}
 
-	// Setting properties of Coordinator
-	c.Task_Idle = make([]*Task, 0)
-	c.Task_IN_Progress = make([]*Task, 0)
-	c.Task_Completed = make([]*Task, 0)
-	c.NReduce = nReduce
-	c.stopCh = make(chan struct{})
-	c.WaitMapGroup = sync.WaitGroup{}
-	c.WaitMapGroup.Add(len(files))
-	// Construct New task struct
-	c.Task_Idle = append(c.Task_Idle, ConstructTask(files, MAPTASK)...)
-
-	go c.CoordinatorCompletedHandler()
-
+	c.ConstructTaskGroupList(files, nReduce)
+	// when the entire job completed,
+	// exit the coordinator
+	go JobCompletedHandler(&c)
+	go c.timeoutHandler()
+	// Debug(&c, len(files)+nReduce)
 	c.server()
 	return &c
 }
