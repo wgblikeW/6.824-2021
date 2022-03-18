@@ -1,0 +1,16 @@
+TestBasicAgree2B
+ok  	6.824/raft	1.150s
+TestRPCBytes2B
+ok  	6.824/raft	2.717s
+TestFailAgree2B
+ok  	6.824/raft	5.204s
+TestFailNoAgree2B
+ok  	6.824/raft	4.302s
+TestConcurrentStarts2B
+ok  	6.824/raft	0.678s
+TestRejoin2B
+ok  	6.824/raft	4.472s
+TestBackup2B
+ok  	6.824/raft	27.223s
+TestCount2B
+ok  	6.824/raft	2.305s

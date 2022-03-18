@@ -135,6 +135,9 @@ func (rf *Raft) getRangeEntreis(fromIdx uint64, toIdx uint64) []logEntry {
 	defer rf.mu.Unlock()
 	offset := rf.getLastSnapshotIndex()
 	fromIdxAlign, toIdxAlign := fromIdx-offset, toIdx-offset
+	if fromIdxAlign > toIdxAlign {
+		panic("fromIdxAlign larger than toIdxAlign")
+	}
 	return rf.log[fromIdxAlign:toIdxAlign]
 }
 

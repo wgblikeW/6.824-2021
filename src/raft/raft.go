@@ -50,6 +50,19 @@ const (
 	NONE int32 = -1
 )
 
+type InstallSnapshotArgs struct {
+	Term             uint64 // leader's term
+	LeaderID         int32  // so follower can redirect clients
+	LastIncluedIndex uint64 // the snapshot replaces all entries up through and including this index
+	LastIncludeTerm  uint64 // term of lastIncluedIndex
+	Data             []byte // raw bytes of the snapshot chunck
+}
+
+type InstallSnapshotReply struct {
+	Term    uint64 // currentTerm, for leader to update itslef
+	Success bool   // indicates the installSnapshotRPC perform or not
+}
+
 type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
@@ -60,6 +73,34 @@ type ApplyMsg struct {
 	Snapshot      []byte
 	SnapshotTerm  int
 	SnapshotIndex int
+}
+
+//
+// example RequestVote RPC arguments structure.
+// field names must start with capital letters!
+//
+type RequestVoteArgs struct {
+	// Candidates arise an election and they need to provide
+	// Information to follower to decide whether vote to one
+	// Candidate based on some specific rules.
+
+	Term         uint64 // candidate's term
+	CandidateID  int32  // identity of subject who becomes a candidate
+	LastLogIndex uint64 // Index of candidate's last log entry
+	LastLogTerm  uint64 // Term of candidate's last log entry
+	// Your data here (2A, 2B).
+}
+
+//
+// example RequestVote RPC reply structure.
+// field names must start with capital letters!
+//
+type RequestVoteReply struct {
+	// Your data here (2A).
+	VoteID      int32
+	Term        uint64 // currentTerm, for candidate to update itself
+	VoteGranted bool   // true means candidate received vote
+	Reason      string
 }
 
 //
@@ -182,13 +223,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		lastIdx := rf.getLastIndex()
 		// trimmedEntries includes the logEntry with index of [lastIdx]
 		trimmedEntries := rf.getRangeEntreis(uint64(index), lastIdx+1)
+
 		rf.mu.Lock()
-		rf.log = append([]logEntry{}, trimmedEntries...) //TODO: Since log is modified, checking raftState such as lastApplied, commitIndex and so on
+		rf.log = append([]logEntry{}, trimmedEntries...)
 		lastSnapshotTerm := rf.log[0].Term
 		lastEntry := rf.log[len(rf.log)-1]
 		rf.mu.Unlock()
+
 		rf.setLastSnapshotIndex(uint64(index))
 		rf.setLastSnapshotTerm(lastSnapshotTerm)
+
 		if lastEntry.Index > rf.getLastSnapshotIndex() {
 			rf.setLastLogIdx(lastEntry.Index)
 			rf.setLastSnapshotTerm(lastEntry.Term)
@@ -202,34 +246,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		// persist the raftState and Snapshot, we can not call the persist()
 		rf.persister.SaveStateAndSnapshot(rf.getSerRaftState(), snapshot)
 	}
-}
-
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
-type RequestVoteArgs struct {
-	// Candidates arise an election and they need to provide
-	// Information to follower to decide whether vote to one
-	// Candidate based on some specific rules.
-
-	Term         uint64 // candidate's term
-	CandidateID  int32  // identity of subject who becomes a candidate
-	LastLogIndex uint64 // Index of candidate's last log entry
-	LastLogTerm  uint64 // Term of candidate's last log entry
-	// Your data here (2A, 2B).
-}
-
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
-type RequestVoteReply struct {
-	// Your data here (2A).
-	VoteID      int32
-	Term        uint64 // currentTerm, for candidate to update itself
-	VoteGranted bool   // true means candidate received vote
-	Reason      string
 }
 
 func (rf *Raft) canCommit() bool {
@@ -449,6 +465,47 @@ func (rf *Raft) runLeader() {
 	}
 }
 
+//
+// installSnapshot Send installSnapshotRPC to remote peer who
+// is far behind the leader
+// TODO: Unfininshed yet
+//
+func (rf *Raft) installSnapshot(peerIdx int) {
+	// only leader can send installSnapshot
+	if rf.getState() != Leader {
+		return
+	}
+	args := &InstallSnapshotArgs{
+		Term:             rf.getCurrentTerm(),
+		LeaderID:         rf.getServerID(),
+		LastIncluedIndex: rf.getLastSnapshotIndex(),
+		LastIncludeTerm:  rf.getLastSnapshotTerm(),
+		Data:             rf.persister.ReadSnapshot(),
+	}
+	reply := &InstallSnapshotReply{}
+
+	ok := rf.peers[peerIdx].Call("Raft.InstallSnapshot", args, reply)
+	if !ok {
+		rf.logger.Error("fail to send InstallSnapshotRPC to", peerIdx)
+	} else {
+		if reply.Success {
+			// remote server performs installsnapshot successfully
+			// update the nextIndex and matchIndex
+			rf.mat_and_next_locker.Lock()
+			rf.nextIndex[peerIdx] = Max(args.LastIncluedIndex+1, rf.nextIndex[peerIdx])
+			rf.matchIndex[peerIdx] = Max(args.LastIncluedIndex, rf.matchIndex[peerIdx])
+			rf.mat_and_next_locker.Unlock()
+		} else {
+			// check whether we should give up leadership
+			if reply.Term > rf.getCurrentTerm() {
+				rf.setState(Follower)
+				rf.setCurrentTerm(reply.Term)
+				rf.setVoteFor(NONE)
+			}
+		}
+	}
+}
+
 func (rf *Raft) logReplicate() {
 	if rf.getState() != Leader {
 		return
@@ -460,8 +517,8 @@ func (rf *Raft) logReplicate() {
 		}
 		rf.mat_and_next_locker.Lock()
 		if rf.nextIndex[peerIdx] <= rf.getLastSnapshotIndex() {
-			// call installSnapshotRPC
-			// TODO: InstallSnapshotRPC
+			go rf.installSnapshot(peerIdx)
+			rf.mat_and_next_locker.Unlock()
 			continue
 		}
 		rf.mat_and_next_locker.Unlock()
@@ -495,7 +552,7 @@ func (rf *Raft) logReplicate() {
 			// rf.logger.Info("sending appendentries rpc call to", peerIdx)
 			ok := peer.Call("Raft.AppendEntriesHandler", args, reply)
 			if !ok {
-				rf.logger.Error("sending append entries rpc call fails")
+				rf.logger.Error("sending append entries rpc call fails", rf.getServerID())
 			} else {
 				if !reply.Success {
 					if reply.Term > rf.getCurrentTerm() {

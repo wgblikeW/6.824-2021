@@ -2,6 +2,48 @@ package raft
 
 import "time"
 
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	// cluster has a claimed leader, reset the HeartbeatTimer
+	rf.heartBeatTimer.Reset(randomTimeout(300*time.Millisecond, 800*time.Millisecond))
+
+	reply.Success = false
+	reply.Term = rf.getCurrentTerm()
+
+	if rf.getCurrentTerm() > args.Term {
+		// illegal leader
+		return
+	}
+	if args.LastIncluedIndex > rf.getLastSnapshotIndex() {
+		// ensuring this InsallSnapshot is new
+		lastIdx := rf.getLastIndex()
+		var trimmedLog []logEntry
+		if args.LastIncluedIndex > lastIdx {
+			// current peer is far behind the leader, discard entire log
+			trimmedLog = append([]logEntry{}, logEntry{Index: args.LastIncluedIndex, Term: args.LastIncludeTerm, Command: nil})
+		} else {
+			// current peer keeps up with the leader but not take the snapshot
+			trimmedLog = append([]logEntry{}, rf.getRangeEntreis(args.LastIncluedIndex, lastIdx+1)...)
+		}
+		rf.mu.Lock()
+		rf.logger.Debug("After trimming log entries", trimmedLog)
+		rf.log = append([]logEntry{}, trimmedLog...)
+		lastEntry := rf.log[len(rf.log)-1]
+		rf.mu.Unlock()
+
+		rf.setLastLog(lastEntry.Index, lastEntry.Term)
+		rf.setLastSnapshotIndex(args.LastIncluedIndex)
+		rf.setLastSnapshotTerm(args.LastIncludeTerm)
+		rf.setLastApplied(Max(args.LastIncluedIndex, rf.getLastApplied()))
+		rf.setCommitIndex(Max(args.LastIncluedIndex, rf.getCommitIndex()))
+
+		// notify applyCh to install snapshot
+		rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: int(args.LastIncluedIndex), SnapshotTerm: int(args.LastIncludeTerm)}
+		// persist rafeState and Snapshot to durable storage
+		rf.persister.SaveStateAndSnapshot(rf.getSerRaftState(), args.Data)
+		reply.Success = true
+	}
+}
+
 //
 // invoked by the AppendEntries RPCs
 // AppendEntries was only sent by leader, receiver can be follower, candidate and
