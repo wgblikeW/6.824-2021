@@ -75,12 +75,12 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 				rf.logger.Warn("clearing log suffix",
 					"from", entry.Index,
 					"to", lastIdx, "server", rf.getServerID())
-				rf.logger.Debug("before delete entries", rf.getRangeEntreis(0, rf.getLastIndex()+1))
+				rf.logger.Debug("before delete entries", rf.getRangeEntreis(rf.getLastSnapshotIndex(), rf.getLastIndex()+1))
 				if err := rf.deleteRange(entry.Index, lastIdx); err != nil { // delete any conflict entries
 					rf.logger.Error("failed to clear log suffix", "error", err)
 					return
 				}
-				rf.logger.Debug("log entries after delete", rf.getRangeEntreis(0, rf.getLastIndex()+1))
+				rf.logger.Debug("log entries after delete", rf.getRangeEntreis(rf.getLastSnapshotIndex(), rf.getLastIndex()+1))
 				newEntries = args.Entries[i:]
 				break
 			}
@@ -100,7 +100,7 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 		idx := Min(args.LeaderCommit, rf.getLastIndex())
 		rf.setCommitIndex(idx)
 		rf.persist()
-		rf.apply()
+		rf.notifyApplyCh <- struct{}{}
 	}
 	rf.heartBeatTimer.Reset(randomTimeout(300*time.Millisecond, 800*time.Millisecond))
 }

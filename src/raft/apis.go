@@ -26,9 +26,10 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-	applyCh     chan ApplyMsg
-	applyLocker sync.Mutex
-	startLocker sync.Mutex
+	applyCh       chan ApplyMsg
+	notifyApplyCh chan struct{}
+	applyLocker   sync.Mutex
+	startLocker   sync.Mutex
 	// Persistent state on all servers
 	votedFor int32      // candidatedId that received vote in current term (or null if none)
 	log      []logEntry // log entries, each entry contains command for state machine, and term when entry was received by leader(first index is 1)
@@ -40,6 +41,30 @@ type Raft struct {
 	logger              hclog.Logger
 }
 
+func (rf *Raft) getLastSnapshotIndex() uint64 {
+	rf.lastLock.Lock()
+	defer rf.lastLock.Unlock()
+	return rf.lastSnapshotIndex
+}
+
+func (rf *Raft) setLastSnapshotIndex(index uint64) {
+	rf.lastLock.Lock()
+	defer rf.lastLock.Unlock()
+	rf.lastSnapshotIndex = index
+}
+
+func (rf *Raft) getLastSnapshotTerm() uint64 {
+	rf.lastLock.Lock()
+	defer rf.lastLock.Unlock()
+	return rf.lastSnapshotTerm
+}
+
+func (rf *Raft) setLastSnapshotTerm(term uint64) {
+	rf.lastLock.Lock()
+	defer rf.lastLock.Unlock()
+	rf.lastSnapshotTerm = term
+}
+
 func (rf *Raft) storeLogs(logEntries *[]logEntry) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -49,10 +74,11 @@ func (rf *Raft) storeLogs(logEntries *[]logEntry) {
 func (rf *Raft) getEntry(index uint64, logEntry *logEntry) error {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if index >= uint64(len(rf.log)) {
+	indexAlign := index - rf.getLastSnapshotIndex()
+	if indexAlign >= uint64(len(rf.log)) {
 		return errors.New("log index out of range")
 	}
-	Entry := rf.log[index]
+	Entry := rf.log[indexAlign]
 	*logEntry = Entry
 	return nil
 }
@@ -78,10 +104,11 @@ func (rf *Raft) getTermFirstEntry(term uint64, log *logEntry) error {
 func (rf *Raft) deleteRange(from uint64, to uint64) error {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if from > to {
+	fromAlign, toAlign := from-rf.getLastSnapshotIndex(), to-rf.getLastSnapshotIndex()
+	if fromAlign > toAlign {
 		return errors.New("from larger than to")
 	}
-	rf.log = rf.log[0:from]
+	rf.log = rf.log[0:fromAlign]
 	lastEntry := rf.log[len(rf.log)-1]
 	rf.setLastLog(lastEntry.Index, lastEntry.Term)
 	return nil
@@ -95,24 +122,20 @@ func (rf *Raft) getLastVote() int32 {
 	return atomic.LoadInt32(&rf.votedFor)
 }
 
-func (rf *Raft) quorumSize() int {
-	return len(rf.peers)
-}
-
 func (rf *Raft) getServerID() int32 {
 	return atomic.LoadInt32(&rf.me)
 }
 
+//
+// getRangeEntries return the list of logEntry from [fromIdx] to [toIdx]
+// and does not contain the logEntry with index that is equal to [toIdx]
+//
 func (rf *Raft) getRangeEntreis(fromIdx uint64, toIdx uint64) []logEntry {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	return rf.log[fromIdx:toIdx]
-}
-
-func (rf *Raft) getSingleEntry(index uint64) logEntry {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.log[index]
+	offset := rf.getLastSnapshotIndex()
+	fromIdxAlign, toIdxAlign := fromIdx-offset, toIdx-offset
+	return rf.log[fromIdxAlign:toIdxAlign]
 }
 
 func (rf *Raft) setLastLogIdx(logIdx uint64) {

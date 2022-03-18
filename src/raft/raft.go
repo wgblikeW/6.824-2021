@@ -105,14 +105,10 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	rf.persister.SaveRaftState(rf.getSerRaftState())
+}
+
+func (rf *Raft) getSerRaftState() []byte {
 	bytesWriter := new(bytes.Buffer)
 	e := labgob.NewEncoder(bytesWriter)
 
@@ -124,9 +120,11 @@ func (rf *Raft) persist() {
 	lastIdx, lastTerm := rf.getLastEntry()
 	e.Encode(lastIdx)
 	e.Encode(lastTerm)
-	e.Encode(rf.getRangeEntreis(0, lastIdx+1))
+	e.Encode(rf.getRangeEntreis(rf.getLastSnapshotIndex(), lastIdx+1))
+	e.Encode(rf.getLastSnapshotIndex())
+	e.Encode(rf.getLastSnapshotTerm())
 	data := bytesWriter.Bytes()
-	rf.persister.SaveRaftState(data)
+	return data
 }
 
 //
@@ -137,24 +135,11 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
 	rf.mu.Lock()
 	defer rf.mu.Unlock() // lock for log
 	bytesReader := bytes.NewBuffer(data)
 	decoder := labgob.NewDecoder(bytesReader)
-	var currentTerm, commitIdx, lastApplied, lastLogIdx, lastLogTerm uint64
+	var currentTerm, commitIdx, lastApplied, lastLogIdx, lastLogTerm, lastSnapshotIdx, lastSnapshotTerm uint64
 	var votedFor int32
 	if decoder.Decode(&currentTerm) != nil ||
 		decoder.Decode(&votedFor) != nil ||
@@ -162,7 +147,9 @@ func (rf *Raft) readPersist(data []byte) {
 		decoder.Decode(&lastApplied) != nil ||
 		decoder.Decode(&lastLogIdx) != nil ||
 		decoder.Decode(&lastLogTerm) != nil ||
-		decoder.Decode(&rf.log) != nil {
+		decoder.Decode(&rf.log) != nil ||
+		decoder.Decode(&lastSnapshotIdx) != nil ||
+		decoder.Decode(&lastSnapshotTerm) != nil {
 		rf.logger.Error("error in unserialize the raft state")
 	}
 	rf.setCurrentTerm(currentTerm)
@@ -171,6 +158,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.setLastApplied(lastApplied)
 	rf.setLastLogIdx(lastLogIdx)
 	rf.setLastLogTerm(lastLogTerm)
+	rf.setLastSnapshotIndex(lastSnapshotIdx)
+	rf.setLastSnapshotTerm(lastSnapshotTerm)
 }
 
 //
@@ -188,8 +177,31 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
+	if index > int(rf.getLastSnapshotIndex()) {
+		// client snapshot index is larger than ours
+		lastIdx := rf.getLastIndex()
+		// trimmedEntries includes the logEntry with index of [lastIdx]
+		trimmedEntries := rf.getRangeEntreis(uint64(index), lastIdx+1)
+		rf.mu.Lock()
+		rf.log = append([]logEntry{}, trimmedEntries...) //TODO: Since log is modified, checking raftState such as lastApplied, commitIndex and so on
+		lastSnapshotTerm := rf.log[0].Term
+		lastEntry := rf.log[len(rf.log)-1]
+		rf.mu.Unlock()
+		rf.setLastSnapshotIndex(uint64(index))
+		rf.setLastSnapshotTerm(lastSnapshotTerm)
+		if lastEntry.Index > rf.getLastSnapshotIndex() {
+			rf.setLastLogIdx(lastEntry.Index)
+			rf.setLastSnapshotTerm(lastEntry.Term)
+		} else {
+			rf.setLastLogIdx(rf.getLastSnapshotIndex())
+			rf.setLastLogTerm(rf.getLastSnapshotTerm())
+		}
+		rf.setLastApplied(Max(rf.getLastApplied(), rf.getLastSnapshotIndex()))
+		rf.setCommitIndex(Max(rf.getCommitIndex(), rf.getLastSnapshotIndex()))
 
+		// persist the raftState and Snapshot, we can not call the persist()
+		rf.persister.SaveStateAndSnapshot(rf.getSerRaftState(), snapshot)
+	}
 }
 
 //
@@ -234,15 +246,17 @@ func (rf *Raft) canCommit() bool {
 }
 
 func (rf *Raft) apply() {
-	// TODO: implement notifyApplyCh
-	rf.applyLocker.Lock()
-	defer rf.applyLocker.Unlock() // ensure apply in order
-	applyEntries := rf.getRangeEntreis(rf.getLastApplied()+1, rf.getCommitIndex()+1)
-	rf.logger.Info("Server", rf.getServerID(), "apply entries ", applyEntries)
-	rf.setLastApplied(rf.getCommitIndex())
-	rf.persist()
-	for _, entry := range applyEntries {
-		rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: int(entry.Index), Command: entry.Command}
+	for {
+		select {
+		case <-rf.notifyApplyCh:
+			applyEntries := rf.getRangeEntreis(rf.getLastApplied()+1, rf.getCommitIndex()+1)
+			rf.logger.Info("Server", rf.getServerID(), "apply entries ", applyEntries)
+			rf.setLastApplied(rf.getCommitIndex())
+			rf.persist()
+			for _, entry := range applyEntries {
+				rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: int(entry.Index), Command: entry.Command}
+			}
+		}
 	}
 }
 
@@ -444,6 +458,13 @@ func (rf *Raft) logReplicate() {
 			// skip itself
 			continue
 		}
+		rf.mat_and_next_locker.Lock()
+		if rf.nextIndex[peerIdx] <= rf.getLastSnapshotIndex() {
+			// call installSnapshotRPC
+			// TODO: InstallSnapshotRPC
+			continue
+		}
+		rf.mat_and_next_locker.Unlock()
 		go func(peer *labrpc.ClientEnd, peerIdx int) {
 			args := &AppendEntriesArgs{
 				LeaderCommit: rf.getCommitIndex(),
@@ -501,7 +522,7 @@ func (rf *Raft) logReplicate() {
 				if rf.canCommit() {
 					rf.setCommitIndex(rf.getLastIndex())
 					rf.persist()
-					rf.apply()
+					rf.notifyApplyCh <- struct{}{}
 				}
 			}
 		}(peer, peerIdx)
@@ -535,7 +556,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		votedFor: NONE,
 		log:      []logEntry{{0, 0, nil}}, // log entry at index 0 is unused
 		// volaile state on all servers
-		applyCh: applyCh,
+		applyCh:       applyCh,
+		notifyApplyCh: make(chan struct{}),
 		// volaile state on leaders
 		nextIndex:  make([]uint64, len(peers)),
 		matchIndex: make([]uint64, len(peers)),
@@ -546,11 +568,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			Output: LogOutput,
 		}),
 		raftState: raftState{
-			CurrentTerm:  0,
-			CommitIndex:  0,
-			LastApplied:  0,
-			LastLogIndex: 0,
-			LastLogTerm:  0,
+			CurrentTerm:       0,
+			CommitIndex:       0,
+			LastApplied:       0,
+			LastLogIndex:      0,
+			LastLogTerm:       0,
+			lastSnapshotIndex: 0,
+			lastSnapshotTerm:  0,
 		},
 	}
 	rf.setState(Follower)
@@ -560,6 +584,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.runRaft()
-
+	go rf.apply()
 	return rf
 }
