@@ -37,11 +37,11 @@ func (ck *Clerk) replyHandler(Err Err, Op string) string {
 		DPrintf("[Client] succeed to call %v %v Reason: %v", leaderID, Op, Err)
 		return OK
 	case ErrWrongLeader:
-		DPrintf("[Client] failed to call %v %v Reason: %v", leaderID, Err)
-		ck.setLeaderID(leaderID % int64(len(ck.servers))) // Optimistically, maybe the next is the leader
+		DPrintf("[Client] failed to call %v %v Reason: %v", leaderID, Op, Err)
+		ck.setLeaderID((leaderID + 1) % int64(len(ck.servers))) // Optimistically, maybe the next is the leader
 		return ErrWrongLeader
 	default:
-		DPrintf("[Client] failed to call %v %v Reason: %v", leaderID, Err)
+		DPrintf("[Client] failed to call %v %v Reason: %v", leaderID, Op, Err)
 		return ErrNoKey
 	}
 }
@@ -76,7 +76,7 @@ func (ck *Clerk) Get(key string) string {
 			DPrintf("[Client] failed to call %v Due to remote Server Crash Or Network partition", leaderID)
 		} else {
 			// Get the remote server's reply
-			if ck.replyHandler(reply.Err, "Get") == OK {
+			if n := ck.replyHandler(reply.Err, "Get"); n == OK || n == ErrNoKey {
 				break
 			}
 		}

@@ -460,7 +460,7 @@ func (rf *Raft) runLeader() {
 
 	for rf.getState() == Leader {
 		// replicate log
-		heartBeatTimer := time.NewTimer(time.Millisecond * 100)
+		heartBeatTimer := time.NewTimer(time.Millisecond * 30)
 		<-heartBeatTimer.C
 		rf.logReplicate()
 	}
@@ -602,7 +602,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	// settings of logger
 	LogLevel := "DEBUG"
-	LogOutput := os.Stderr
+	// LogOutput := os.Stderr
+	LogOutput, _ := os.OpenFile("./raft.log", os.O_APPEND|os.O_WRONLY, 0600)
 
 	// Raft Server initialization
 	rf := &Raft{

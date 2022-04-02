@@ -2,6 +2,12 @@ package kvraft
 
 import "sync/atomic"
 
+func (kv *KVServer) setupNotifyCh(logIdx int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.expectedLogEntryMap[logIdx] = make(chan NotifyApplyMsg)
+}
+
 func (ck *Clerk) getLeaderID() int64 {
 	return atomic.LoadInt64(&ck.leaderID)
 }
@@ -22,9 +28,9 @@ func (kv *KVServer) getStorageValue(key string) (string, Err) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	if value, exists := kv.Storage[key]; !exists {
-		return "", OK
+		return "", ErrNoKey
 	} else {
-		return value, ErrNoKey
+		return value, OK
 	}
 }
 
@@ -39,8 +45,8 @@ func (kv *KVServer) doAppend(key string, value string) Err {
 	defer kv.mu.Unlock()
 	if oldV, exists := kv.Storage[key]; exists {
 		kv.Storage[key] = oldV + value
-		return OK
 	} else {
-		return ErrNoKey
+		kv.Storage[key] = value
 	}
+	return OK
 }

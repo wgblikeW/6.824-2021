@@ -45,13 +45,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Start raft consensus algorithm to make replicates across the cluster
 	logIdx, logTerm, isLeader := kv.rf.Start(
 		GetArgs{Key: args.Key})
-	kv.expectedLogEntryMap[logIdx] = make(chan NotifyApplyMsg)
 	// Only Leader can do operations and get consensus across the cluster (no optimization)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	DPrintf("[Server %v] Receiving Get RPCs", kv.me)
 
+	kv.setupNotifyCh(logIdx)
 	/**
 		await for the Raft peers reach consensus
 		the leader maybe out-dated or disconnect from the cluster
@@ -64,9 +65,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	case <-time.Tick(time.Second * 3):
 		// timeout for waiting Raft apply Ops
 		delete(kv.expectedLogEntryMap, logIdx)
-		DPrintf("[Server] Timeout For waiting Raft peers to reach Consensus")
+		DPrintf("[Server %v] Timeout For waiting Raft peers to reach Consensus", kv.me)
 	case resp := <-kv.expectedLogEntryMap[logIdx]:
-		DPrintf("[Server] Raft Peers reach Consensus For Op %v", "Get")
+		DPrintf("[Server %v] Raft Peers reach Consensus For Op %v %v", kv.me, "Get", resp)
 		if resp.LogTerm != uint64(logTerm) {
 			// leadership has been transfered during log replicate
 			reply.Err = ErrWrongLeader
@@ -88,7 +89,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-
+	DPrintf("[Server %v] Receiving PutAppend RPCs", kv.me)
+	// setup notifyCh for client
+	kv.setupNotifyCh(logIdx)
 	/**
 		await for the Raft peers reach consensus
 		the leader maybe out-dated or disconnect from the cluster
@@ -100,9 +103,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	case <-time.Tick(time.Second * 3):
 		// timeout for waiting Raft apply Ops
 		delete(kv.expectedLogEntryMap, logIdx)
-		DPrintf("[Server] Timeout For waiting Raft peers to reach Consensus")
+		DPrintf("[Server %v] Timeout For waiting Raft peers to reach Consensus", kv.me)
 	case resp := <-kv.expectedLogEntryMap[logIdx]:
-		DPrintf("[Server] Raft Peers reach Consensus For Op %v", "Get")
+		DPrintf("[Server %v] Raft Peers reach Consensus For Op %v %v", kv.me, "Put/Append", resp.Err)
 		if resp.LogTerm != uint64(logTerm) {
 			// leadership has been transfered during log replicate
 			reply.Err = ErrWrongLeader
@@ -148,16 +151,20 @@ func (kv *KVServer) doGet(_getArgs *GetArgs, respToClient *NotifyApplyMsg) {
 
 // doPutAppend implement the Put/Append Ops to the K/V Server
 func (kv *KVServer) doPutAppend(_putAppendArgs *PutAppendArgs, respToClient *NotifyApplyMsg) {
-	switch _putAppendArgs.Key {
+	DPrintf("[Server %v] doPutAppend %v", kv.me, _putAppendArgs)
+	switch _putAppendArgs.Op {
 	case PUT:
 		kv.doPut(_putAppendArgs.Key, _putAppendArgs.Value)
+		respToClient.Value = ""
 		respToClient.Err = OK
 	case APPEND:
 		err := kv.doAppend(_putAppendArgs.Key, _putAppendArgs.Value)
+		respToClient.Value = ""
 		respToClient.Err = err
 	}
 
 	if expectedClientCh, exists := kv.expectedLogEntryMap[int(respToClient.LogIdx)]; exists {
+		DPrintf("[Server %v] Sending to notifyCh Err %v", kv.me, respToClient.Err)
 		expectedClientCh <- *respToClient
 	}
 }
@@ -183,6 +190,7 @@ func (kv *KVServer) watcher() {
 		select {
 		case applyMsg := <-kv.applyCh:
 			// Receiving applyMsg new logs were committed
+			DPrintf("[Server %v] Receiving ApplyMsg From ApplyCh %v", kv.me, applyMsg)
 			kv.apply(applyMsg)
 		}
 	}
