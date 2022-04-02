@@ -10,12 +10,10 @@ type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key   string
-	Value string
-	Op    string // "Put" or "Append"
-	// You'll have to add definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
+	Key      string
+	Value    string
+	Op       string // "Put" or "Append"
+	ClientID int64  // ClientID used to identify the duplicate request
 }
 
 type PutAppendReply struct {
@@ -23,11 +21,18 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key string
-	// You'll have to add definitions here.
+	Key      string
+	ClientID int64 // ClientID used to identify the duplicate request
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+type NotifyApplyMsg struct {
+	LogIdx  uint64
+	LogTerm uint64
+	Value   string
+	Err     Err
 }

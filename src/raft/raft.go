@@ -67,6 +67,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 2D:
 	SnapshotValid bool
@@ -270,7 +271,7 @@ func (rf *Raft) apply() {
 			rf.setLastApplied(rf.getCommitIndex())
 			rf.persist()
 			for _, entry := range applyEntries {
-				rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: int(entry.Index), Command: entry.Command}
+				rf.applyCh <- ApplyMsg{CommandValid: true, CommandIndex: int(entry.Index), CommandTerm: int(entry.Term), Command: entry.Command}
 			}
 		}
 	}
