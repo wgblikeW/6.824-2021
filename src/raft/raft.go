@@ -287,6 +287,10 @@ func (rf *Raft) initIndex() {
 	}
 }
 
+func (rf *Raft) notifyLeaderAlter() {
+	rf.applyCh <- ApplyMsg{CommandValid: false, Command: "LeaderAlter", CommandIndex: -1, CommandTerm: -1}
+}
+
 //
 // arise RequestVote RPCs calls
 //
@@ -320,6 +324,7 @@ func (rf *Raft) RequestVote(electionTimeout <-chan time.Time) {
 					rf.logger.Info("candidate become leader", rf.getServerID())
 					rf.setState(Leader)
 					rf.initIndex()
+					go rf.notifyLeaderAlter()
 					// leader initialization
 					goroutineTracer.Done()
 					return
@@ -469,7 +474,6 @@ func (rf *Raft) runLeader() {
 //
 // installSnapshot Send installSnapshotRPC to remote peer who
 // is far behind the leader
-// TODO: Unfininshed yet
 //
 func (rf *Raft) installSnapshot(peerIdx int) {
 	// only leader can send installSnapshot
@@ -570,12 +574,12 @@ func (rf *Raft) logReplicate() {
 				} else { // reply Success is true
 					// rf.logger.Info("reply Success from server", peerIdx)
 					prevLogIdx, entriesLen := args.PrevLogIndex, len(args.Entries)
+					rf.mat_and_next_locker.Lock()
 					if prevLogIdx+uint64(entriesLen) >= rf.nextIndex[peerIdx] {
-						rf.mat_and_next_locker.Lock()
 						rf.nextIndex[peerIdx] = rf.nextIndex[peerIdx] + uint64(entriesLen)
 						rf.matchIndex[peerIdx] = rf.nextIndex[peerIdx] - 1
-						rf.mat_and_next_locker.Unlock()
 					}
+					rf.mat_and_next_locker.Unlock()
 				}
 				if rf.canCommit() {
 					rf.setCommitIndex(rf.getLastIndex())
@@ -603,7 +607,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// settings of logger
 	LogLevel := "DEBUG"
 	// LogOutput := os.Stderr
-	LogOutput, _ := os.OpenFile("./raft.log", os.O_APPEND|os.O_WRONLY, 0600)
+	LogOutput, _ := os.OpenFile("/home/poseidon/6.824/src/kvraft", os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0600)
 
 	// Raft Server initialization
 	rf := &Raft{

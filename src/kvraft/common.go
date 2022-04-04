@@ -14,10 +14,12 @@ type PutAppendArgs struct {
 	Value    string
 	Op       string // "Put" or "Append"
 	ClientID int64  // ClientID used to identify the duplicate request
+	Seq      int64
 }
 
 type PutAppendReply struct {
-	Err Err
+	Err         Err
+	ExpectedSeq int64
 }
 
 type GetArgs struct {

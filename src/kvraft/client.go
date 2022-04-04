@@ -10,8 +10,9 @@ import (
 
 type Clerk struct {
 	servers  []*labrpc.ClientEnd
-	clientID int64
 	leaderID int64 // Clerk should remember the LeaderID(maybe) in order to improve the performance
+	nextSeq  int64
+	clientID int64
 }
 
 func nrand() int64 {
@@ -24,8 +25,9 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
-	ck.setClientID(nrand())
 	ck.leaderID = 0
+	ck.nextSeq = nrand()
+	ck.clientID = nrand()
 	// You'll have to add code here.
 	return ck
 }
@@ -34,7 +36,6 @@ func (ck *Clerk) replyHandler(Err Err, Op string) string {
 	leaderID := ck.getLeaderID()
 	switch Err {
 	case OK:
-		DPrintf("[Client] succeed to call %v %v Reason: %v", leaderID, Op, Err)
 		return OK
 	case ErrWrongLeader:
 		DPrintf("[Client] failed to call %v %v Reason: %v", leaderID, Op, Err)
@@ -60,29 +61,29 @@ func (ck *Clerk) replyHandler(Err Err, Op string) string {
 //
 func (ck *Clerk) Get(key string) string {
 
-	// You will have to modify this function.
 	args := &GetArgs{
 		Key:      key,
 		ClientID: ck.getClientID(),
 	}
-	reply := &GetReply{}
 
 	// Get ops return should reach majority in order to prevent out-dated data
 	for {
 		leaderID := ck.getLeaderID()
 		server := ck.servers[leaderID]
+		reply := &GetReply{}
 		ok := server.Call("KVServer.Get", args, reply)
 		if !ok {
 			DPrintf("[Client] failed to call %v Due to remote Server Crash Or Network partition", leaderID)
+			ck.setLeaderID((leaderID + 1) % int64(len(ck.servers))) // Optimistically, maybe the next is the leader
 		} else {
 			// Get the remote server's reply
 			if n := ck.replyHandler(reply.Err, "Get"); n == OK || n == ErrNoKey {
-				break
+				DPrintf("[Client] succeed to call %v Key %v Value %v", leaderID, args.Key, reply.Value)
+				return reply.Value // return "" when ErrNoKey present
 			}
 		}
 		<-time.Tick(time.Millisecond * 200)
 	}
-	return reply.Value
 }
 
 //
@@ -96,12 +97,14 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
+	DPrintf("[Client %v] Key %v Value %v Seq %v", ck.getClientID(), key, value, ck.getNextSeq())
 	// setting RPCs params for request and reply
 	args := &PutAppendArgs{
 		ClientID: ck.getClientID(),
 		Key:      key,
 		Value:    value,
 		Op:       op,
+		Seq:      ck.getNextSeq(),
 	}
 	reply := &PutAppendReply{}
 
@@ -113,8 +116,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		if !ok {
 			// Cannot send RPCs to remote Server
 			DPrintf("[Client] failed to call %v", leaderID)
+			ck.setLeaderID((leaderID + 1) % int64(len(ck.servers))) // Optimistically, maybe the next is the leader
 		} else { // RPCs call success and get reply
 			if ck.replyHandler(reply.Err, args.Op) == OK {
+				ck.setNextSeq(reply.ExpectedSeq)
 				break
 			}
 		}

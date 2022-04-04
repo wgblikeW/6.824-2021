@@ -28,8 +28,8 @@ type Raft struct {
 	// state a Raft server must maintain.
 	applyCh       chan ApplyMsg
 	notifyApplyCh chan struct{}
-	applyLocker   sync.Mutex
-	startLocker   sync.Mutex
+
+	startLocker sync.Mutex
 	// Persistent state on all servers
 	votedFor int32      // candidatedId that received vote in current term (or null if none)
 	log      []logEntry // log entries, each entry contains command for state machine, and term when entry was received by leader(first index is 1)

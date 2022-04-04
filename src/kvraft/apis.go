@@ -1,6 +1,36 @@
 package kvraft
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+)
+
+func (ck *Clerk) getClientID() int64 {
+	return atomic.LoadInt64(&ck.clientID)
+}
+
+func (ck *Clerk) getNextSeq() int64 {
+	return atomic.LoadInt64(&ck.nextSeq)
+}
+
+func (ck *Clerk) setNextSeq(seq int64) {
+	atomic.StoreInt64(&ck.nextSeq, seq)
+}
+
+func (kv *KVServer) getExpectedSeqUClientID(clientID int64) (int64, bool) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if seq, exists := kv.expectedNextSeq[clientID]; exists {
+		return seq, true
+	} else {
+		return -1, false
+	}
+}
+
+func (kv *KVServer) setExpectedSeqUClientID(clientID int64, expectedSeq int64) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.expectedNextSeq[clientID] = expectedSeq
+}
 
 func (kv *KVServer) setupNotifyCh(logIdx int) {
 	kv.mu.Lock()
@@ -16,20 +46,14 @@ func (ck *Clerk) setLeaderID(idx int64) {
 	atomic.StoreInt64(&ck.leaderID, idx)
 }
 
-func (ck *Clerk) getClientID() int64 {
-	return atomic.LoadInt64(&ck.clientID)
-}
-
-func (ck *Clerk) setClientID(clientID int64) {
-	atomic.StoreInt64(&ck.clientID, clientID)
-}
-
 func (kv *KVServer) getStorageValue(key string) (string, Err) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	if value, exists := kv.Storage[key]; !exists {
+		DPrintf("[Server %v] getStorageValue Key %v Value %v", kv.me, key, value)
 		return "", ErrNoKey
 	} else {
+		DPrintf("[Server %v] getStorageValue Key %v Value %v", kv.me, key, value)
 		return value, OK
 	}
 }
