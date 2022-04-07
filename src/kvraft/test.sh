@@ -16,15 +16,15 @@ echo "TestManyPartitionsOneClient3A"
 go test -run ^TestUnreliable3A$ | grep ok
 echo "TestManyPartitionsManyClients3A"
 go test -run ^TestUnreliable3A$ | grep ok
-# echo "TestPersistOneClient3A"
-# go test -run ^TestUnreliable3A$ | grep ok
-# echo "TestPersistConcurrent3A"
-# go test -run ^TestUnreliable3A$ | grep ok
-# echo "TestPersistConcurrentUnreliable3A"
-# go test -run ^TestUnreliable3A$ | grep ok
-# echo "TestPersistPartition3A"
-# go test -run ^TestUnreliable3A$ | grep ok
-# echo "TestPersistPartitionUnreliable3A"
-# go test -run ^TestUnreliable3A$ | grep ok
-# echo "TestPersistPartitionUnreliableLinearizable3A"
-# go test -run ^TestUnreliable3A$ | grep ok
+echo "TestPersistOneClient3A"
+go test -run ^TestUnreliable3A$ | grep ok
+echo "TestPersistConcurrent3A"
+go test -run ^TestUnreliable3A$ | grep ok
+echo "TestPersistConcurrentUnreliable3A"
+go test -run ^TestUnreliable3A$ | grep ok
+echo "TestPersistPartition3A"
+go test -run ^TestUnreliable3A$ | grep ok
+echo "TestPersistPartitionUnreliable3A"
+go test -run ^TestUnreliable3A$ | grep ok
+echo "TestPersistPartitionUnreliableLinearizable3A"
+go test -run ^TestUnreliable3A$ | grep ok

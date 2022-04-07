@@ -89,7 +89,6 @@ type RequestVoteArgs struct {
 	CandidateID  int32  // identity of subject who becomes a candidate
 	LastLogIndex uint64 // Index of candidate's last log entry
 	LastLogTerm  uint64 // Term of candidate's last log entry
-	// Your data here (2A, 2B).
 }
 
 //
@@ -97,7 +96,6 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
-	// Your data here (2A).
 	VoteID      int32
 	Term        uint64 // currentTerm, for candidate to update itself
 	VoteGranted bool   // true means candidate received vote
@@ -133,7 +131,6 @@ func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isleader bool = false
-	// Your code here (2A).
 	term = int(rf.getCurrentTerm())
 	if rf.getState() == Leader {
 		isleader = true
@@ -209,8 +206,6 @@ func (rf *Raft) readPersist(data []byte) {
 // have more recent info since it communicate the snapshot on applyCh.
 //
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
 	return true
 }
 
@@ -393,6 +388,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Unlock()
 	rf.persist()
 	return int(lastIdx) + 1, int(currentTerm), true
+}
+
+func (rf *Raft) BootstrapStateMachine() {
+	entries := rf.getRangeEntreis(1, rf.getLastApplied()+1) // retrieve all log entries that raft logs contain
+	for _, entry := range entries {
+		rf.applyCh <- ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: int(entry.Index), CommandTerm: int(entry.Term)}
+	}
+
 }
 
 //

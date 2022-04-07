@@ -179,7 +179,7 @@ func (kv *KVServer) doGet(_getArgs *GetArgs, respToClient *NotifyApplyMsg) {
 func (kv *KVServer) doPutAppend(_putAppendArgs *PutAppendArgs, respToClient *NotifyApplyMsg) {
 	DPrintf("[Server %v] doPutAppend %v", kv.me, _putAppendArgs)
 	defer func() {
-		// FSM State has been updated notify the waiting client
+		// K/V Server State has been updated, notifying the waiting client
 		kv.mu.Lock()
 		if expectedClientCh, exists := kv.expectedLogEntryMap[int(respToClient.LogIdx)]; exists {
 			expectedClientCh <- *respToClient
@@ -266,14 +266,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(KVServer)
 	kv.Storage = make(map[string]string)
+	kv.expectedNextSeq = make(map[int64]int64)
+	kv.expectedLogEntryMap = make(map[int]chan NotifyApplyMsg)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-	kv.expectedNextSeq = make(map[int64]int64)
 	kv.persister = persister
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-	kv.expectedLogEntryMap = make(map[int]chan NotifyApplyMsg)
+	go kv.rf.BootstrapStateMachine()
 	go kv.watcher()
 	return kv
 }
