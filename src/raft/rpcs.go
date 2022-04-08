@@ -5,7 +5,6 @@ import "time"
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	// cluster has a claimed leader, reset the HeartbeatTimer
 	rf.heartBeatTimer.Reset(randomTimeout(300*time.Millisecond, 800*time.Millisecond))
-
 	reply.Success = false
 	reply.Term = rf.getCurrentTerm()
 
@@ -37,9 +36,10 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.setCommitIndex(Max(args.LastIncluedIndex, rf.getCommitIndex()))
 
 		// notify applyCh to install snapshot
-		rf.applyCh <- ApplyMsg{SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: int(args.LastIncluedIndex), SnapshotTerm: int(args.LastIncludeTerm)}
+		rf.applyCh <- ApplyMsg{CommandValid: false, Command: "installSnapshot", SnapshotValid: true, Snapshot: args.Data, SnapshotIndex: int(args.LastIncluedIndex), SnapshotTerm: int(args.LastIncludeTerm)}
 		// persist rafeState and Snapshot to durable storage
 		rf.persister.SaveStateAndSnapshot(rf.getSerRaftState(), args.Data)
+		rf.persist()
 		reply.Success = true
 	}
 }
@@ -64,7 +64,6 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 		rf.setCurrentTerm(args.Term)
 		rf.setVoteFor(NONE)
 		rf.setState(Follower)
-		rf.persist()
 	}
 
 	// check consistency with leader
@@ -133,7 +132,6 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 		rf.storeLogs(&newEntries)
 		last := newEntries[n-1]
 		rf.setLastLog(last.Index, last.Term)
-		rf.persist()
 		// rf.logger.Info("Follower", rf.getServerID(), "LogEntries", rf.getRangeEntreis(0, rf.getLastIndex()+1))
 	}
 	rf.heartBeatTimer.Reset(randomTimeout(300*time.Millisecond, 800*time.Millisecond))
@@ -141,7 +139,6 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 	if args.LeaderCommit > 0 && args.LeaderCommit > rf.getCommitIndex() {
 		idx := Min(args.LeaderCommit, rf.getLastIndex())
 		rf.setCommitIndex(idx)
-		rf.persist()
 		rf.notifyApplyCh <- struct{}{}
 	}
 	rf.heartBeatTimer.Reset(randomTimeout(300*time.Millisecond, 800*time.Millisecond))
@@ -195,7 +192,6 @@ func (rf *Raft) RequestVoteHandler(args *RequestVoteArgs, reply *RequestVoteRepl
 	if args.Term > rf.getCurrentTerm() {
 		rf.setCurrentTerm(args.Term)
 		rf.setVoteFor(NONE)
-		rf.persist()
 		if rf.getState() != Follower {
 			rf.setState(Follower)
 		}

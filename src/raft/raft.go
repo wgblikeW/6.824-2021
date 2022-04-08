@@ -150,7 +150,6 @@ func (rf *Raft) persist() {
 func (rf *Raft) getSerRaftState() []byte {
 	bytesWriter := new(bytes.Buffer)
 	e := labgob.NewEncoder(bytesWriter)
-
 	// Raft States need to be persistent
 	e.Encode(rf.getCurrentTerm())
 	e.Encode(rf.getLastVote())
@@ -159,7 +158,7 @@ func (rf *Raft) getSerRaftState() []byte {
 	lastIdx, lastTerm := rf.getLastEntry()
 	e.Encode(lastIdx)
 	e.Encode(lastTerm)
-	e.Encode(rf.getRangeEntreis(rf.getLastSnapshotIndex(), lastIdx+1))
+	e.Encode(rf.getRangeEntreisGivenOff())
 	e.Encode(rf.getLastSnapshotIndex())
 	e.Encode(rf.getLastSnapshotTerm())
 	data := bytesWriter.Bytes()
@@ -261,6 +260,7 @@ func (rf *Raft) apply() {
 	for {
 		select {
 		case <-rf.notifyApplyCh:
+			rf.setLastApplied(Max(rf.getLastSnapshotIndex(), rf.getLastApplied()))
 			applyEntries := rf.getRangeEntreis(rf.getLastApplied()+1, rf.getCommitIndex()+1)
 			rf.logger.Info("Server", rf.getServerID(), "apply entries ", applyEntries)
 			rf.setLastApplied(rf.getCommitIndex())
@@ -391,7 +391,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 func (rf *Raft) BootstrapStateMachine() {
-	entries := rf.getRangeEntreis(1, rf.getLastApplied()+1) // retrieve all log entries that raft logs contain
+	if rf.getLastSnapshotIndex() != 0 {
+		// Raft has taken snapshot before, restarting State Machine should installRPC
+		rf.applyCh <- ApplyMsg{CommandValid: false, Command: "installSnapshot", CommandIndex: -1, CommandTerm: -1, SnapshotValid: true, Snapshot: rf.persister.ReadSnapshot()}
+		rf.setLastApplied(Max(rf.getLastApplied(), rf.getLastSnapshotIndex()))
+	}
+	entries := rf.getRangeEntreis(rf.getLastSnapshotIndex()+1, rf.getLastApplied()+1) // retrieve all log entries that raft has applied
 	for _, entry := range entries {
 		rf.applyCh <- ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: int(entry.Index), CommandTerm: int(entry.Term)}
 	}
@@ -586,7 +591,7 @@ func (rf *Raft) logReplicate() {
 				}
 				if rf.canCommit() {
 					rf.setCommitIndex(rf.getLastIndex())
-					rf.persist()
+					// rf.persist()
 					rf.notifyApplyCh <- struct{}{}
 				}
 			}

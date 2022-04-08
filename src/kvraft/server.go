@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -39,6 +40,7 @@ type KVServer struct {
 	maxraftstate        int             // snapshot if log grows this big
 	Storage             map[string]string
 	expectedLogEntryMap map[int]chan NotifyApplyMsg // tells apply() where to send its notification
+	notifySnapshot      chan int
 	expectedNextSeq     map[int64]int64
 }
 
@@ -159,20 +161,19 @@ func (kv *KVServer) killed() bool {
 
 // doGet implement the Get Ops to the K/V Server
 func (kv *KVServer) doGet(_getArgs *GetArgs, respToClient *NotifyApplyMsg) {
-	kv.mu.Lock()
-	DPrintf("[Server %v] Storage %v", kv.me, kv.Storage)
-	kv.mu.Unlock()
+	defer func() {
+		// notify the Client who is waiting for the Ops to be applied
+		// (maybe such Client doesn't exist)
+		kv.mu.Lock()
+		if expectedClientCh, exists := kv.expectedLogEntryMap[int(respToClient.LogIdx)]; exists {
+			expectedClientCh <- *respToClient
+		}
+		kv.mu.Unlock()
+	}()
 	value, err := kv.getStorageValue(_getArgs.Key)
+	kv.notifySnapshot <- int(respToClient.LogIdx)
 	respToClient.Err = err
 	respToClient.Value = value
-
-	// notify the Client who is waiting for the Ops to be applied
-	// (maybe such Client doesn't exist)
-	kv.mu.Lock()
-	if expectedClientCh, exists := kv.expectedLogEntryMap[int(respToClient.LogIdx)]; exists {
-		expectedClientCh <- *respToClient
-	}
-	kv.mu.Unlock()
 }
 
 // doPutAppend implement the Put/Append Ops to the K/V Server
@@ -205,6 +206,7 @@ func (kv *KVServer) doPutAppend(_putAppendArgs *PutAppendArgs, respToClient *Not
 		respToClient.Err = err
 	}
 	kv.setExpectedSeqUClientID(_putAppendArgs.ClientID, _putAppendArgs.Seq+1)
+	kv.notifySnapshot <- int(respToClient.LogIdx)
 }
 
 // apply do validation of the command and apply command to K/V Server
@@ -238,7 +240,50 @@ func (kv *KVServer) watcher() {
 			if applyMsg.CommandValid != true && applyMsg.Command.(string) == "LeaderAlter" {
 				kv.disableClientConn()
 			}
+			if applyMsg.SnapshotValid == true {
+				// installRPC Receive
+				DPrintf("[Server %v] InstallSnapshotRPC receive", kv.me)
+				kv.readSnapshot(applyMsg.Snapshot)
+			}
 			kv.apply(applyMsg)
+		}
+	}
+}
+
+func (kv *KVServer) readSnapshot(data []byte) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if data == nil || len(data) < 1 {
+		return
+	}
+
+	bytesReader := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(bytesReader)
+	if decoder.Decode(&kv.expectedNextSeq) != nil ||
+		decoder.Decode(&kv.Storage) != nil {
+		DPrintf("[Server %v] error when reading snapshot", kv.me)
+	}
+}
+
+func (kv *KVServer) snapshot(lastIncludedIndex int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	bytesWriter := new(bytes.Buffer)
+	e := labgob.NewEncoder(bytesWriter)
+	e.Encode(&kv.expectedNextSeq)
+	e.Encode(&kv.Storage)
+	kv.rf.Snapshot(lastIncludedIndex, bytesWriter.Bytes())
+}
+
+// periodically check whether need to take a snapshot when new Log Entry
+// was appened to the log
+func (kv *KVServer) stateCamera() {
+	for {
+		select {
+		case commandIdx := <-kv.notifySnapshot:
+			if kv.persister.RaftStateSize() > kv.maxraftstate && kv.maxraftstate != -1 {
+				kv.snapshot(commandIdx)
+			}
 		}
 	}
 }
@@ -268,6 +313,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.Storage = make(map[string]string)
 	kv.expectedNextSeq = make(map[int64]int64)
 	kv.expectedLogEntryMap = make(map[int]chan NotifyApplyMsg)
+	kv.notifySnapshot = make(chan int, 100)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 	kv.persister = persister
@@ -276,5 +322,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	go kv.rf.BootstrapStateMachine()
 	go kv.watcher()
+	go kv.stateCamera()
 	return kv
 }

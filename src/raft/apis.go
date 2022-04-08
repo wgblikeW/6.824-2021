@@ -136,9 +136,18 @@ func (rf *Raft) getRangeEntreis(fromIdx uint64, toIdx uint64) []logEntry {
 	offset := rf.getLastSnapshotIndex()
 	fromIdxAlign, toIdxAlign := fromIdx-offset, toIdx-offset
 	if fromIdxAlign > toIdxAlign {
-		panic("fromIdxAlign larger than toIdxAlign")
+		DPrintf("fromIdx %v toIdx %v offset %v fromIdxAlign %v larger than toIdxAlign %v", fromIdx, toIdx, offset, fromIdxAlign, toIdxAlign)
+		panic("")
 	}
 	return rf.log[fromIdxAlign:toIdxAlign]
+}
+
+func (rf *Raft) getRangeEntreisGivenOff() []logEntry {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	lastIncludedIndex := rf.getLastSnapshotIndex()
+	lastIdx := rf.getLastIndex()
+	return rf.log[0 : lastIdx+1-lastIncludedIndex]
 }
 
 func (rf *Raft) setLastLogIdx(logIdx uint64) {
